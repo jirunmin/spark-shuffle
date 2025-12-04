@@ -40,6 +40,7 @@
 | Worker 1 | ecs.g3il.large | 2 vCPU | 8 GiB | SSD PL0 20 GiB | Ubuntu 22.04 |
 | Worker 2 | ecs.g3il.large | 2 vCPU | 8 GiB | SSD PL0 20 GiB | Ubuntu 22.04 |
 
+---
 
 #### 2. 软件环境
 
@@ -59,17 +60,19 @@
 
 - Python **3.10.12**
 
-# **（可选）3. 节点角色与服务分布**
+---
+
+#### 3. 节点角色与服务分布
 
 | 节点 IP      | 主机名          | 角色     | 运行服务            |
-| ---------- | ------------ | ------ | --------------- |
-| 172.31.0.2 | spark-master | Master | Master + Worker |
-| 172.31.0.3 | worker-1     | Worker | Worker          |
-| 172.31.0.4 | worker-2     | Worker | Worker          |
+| ---------- | ------------      | ------ | --------------- |
+| 172.31.0.2 | spark-master      | Master | Master + Worker |
+| 172.31.0.3 | spark-worker1     | Worker | Worker          |
+| 172.31.0.4 | spark-worker2     | Worker | Worker          |
 
 ---
 
-# **（可选）4. Spark 资源配置**
+#### 4. Spark 资源配置
 
 | 项目            | 数值      |
 | ------------- | ------- |
@@ -77,4 +80,8 @@
 | Worker 内存     | 4 GB    |
 | Shuffle 服务端口  | 7337    |
 | Spark UI 端口   | 8080    |
+
+### 实验负载
+
+#### 1. 数据集说明
 
