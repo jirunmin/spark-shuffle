@@ -66,7 +66,7 @@
 
 | 节点 IP      | 主机名          | 角色     | 运行服务            |
 | ---------- | ------------      | ------ | --------------- |
-| 172.31.0.2 | spark-master      | Master | Master + Worker |
+| 172.31.0.2 | spark-master      | Master | Master |
 | 172.31.0.3 | spark-worker1     | Worker | Worker          |
 | 172.31.0.4 | spark-worker2     | Worker | Worker          |
 
@@ -98,16 +98,16 @@ id,rand1,rand2
 
 这种结构能够方便构造基于键（key）的 Shuffle 工作负载，用于测试 Hash Shuffle 与 Sort Shuffle 在不同数据规模下的性能差异。
 
-根据实验需求，生成了六个不同规模的数据集，分别包含 8M、16M、32M、64M、128M、256M 条记录，文件大小从约 166MB 到 5.6GB 不等：
+根据实验需求，生成了六个不同规模的数据集，分别包含 2M、4M、8M、16M、32M、64M 条记录，文件大小从约 41MB 到 1.4GB 不等：
 
 | 数据集名称         | 行数          | 文件大小 |
 | ------------- | ----------- | ------- |
-| data_8m.csv   | 8,000,000   | 166 MB  |
+| data_2m.csv   | 2,000,000   | 41 MB  |
+| data_4m.csv  | 4,000,000  | 83 MB  |
+| data_8m.csv  | 8,000,000  | 166 MB  |
 | data_16m.csv  | 16,000,000  | 337 MB  |
-| data_32m.csv  | 32,000,000  | 685 MB  |
-| data_64m.csv  | 64,000,000  | 1.4 GB  |
-| data_128m.csv | 128,000,000 | 2.8 GB  |
-| data_256m.csv | 256,000,000 | 5.6 GB  |
+| data_32m.csv | 32,000,000 | 685 MB  |
+| data_64m.csv | 64,000,000 | 1.4 GB  |
 
 为了保证 Worker 节点能够本地访问数据，所有数据集均被分发到 Spark Standalone 集群的所有节点（Master + Worker）相同路径 `/home/spark/data` 下。
 
@@ -119,64 +119,240 @@ id,rand1,rand2
 
 ---
 
-### **（1）聚合任务：reduceByKey（基于 rand1 分组）**
+**（1）聚合类工作负载：reduceByKey**
 
-读取数据后，以第二列 `rand1` 作为 key 进行计数聚合：
+该工作负载最能反映 Spark 在数据聚合场景的 Shuffle 行为。
 
-```python
-rdd = sc.textFile("file:///home/spark/data/data_XX.csv")
-pairs = rdd.map(lambda line: (line.split(",")[1], 1))
-out = pairs.reduceByKey(lambda a, b: a + b)
-out.count()
+处理流程如下：
+
+```scala
+val data = sc.textFile(input)
+val pairs = data.map { line =>
+    val arr = line.split(",")
+    (arr[1].toInt, 1)      // 使用 rand1 作为 key，保证 key 分布均匀
+}
+val result = pairs.reduceByKey(_ + _)
+result.saveAsTextFile(output)
 ```
 
-特点：
+这样处理的特点是：
 
-* `rand1` 的取值范围较小（0～1,000,000），使得 **重复 key 数量巨大**；
-* 会产生大量的 Shuffle 数据，用于聚合相同 key；
-* 对 **Hash Shuffle 与 Sort Shuffle 的性能差距较敏感**。
+- `reduceByKey` 会对相同 key 的 value 进行聚合；
+- 会触发 Shuffle，将相同 key 的记录移动到同一 Reducer；
+- 使用 CSV 中均匀分布的 `rand1` 作为 key，可有效避免数据倾斜；
+- 是 Shuffle 性能评测中最典型的 benchmark。
 
-此任务主要用于评估两种 Shuffle 算法在 **聚合类操作** 下的执行时间与 Shuffle Read/Write 大小。
+此 workload 用于测试 **聚合类 Shuffle** 场景下的执行时间与 Shuffle I/O 性能。
 
 ---
 
-### **（2）排序任务：sortBy（基于 id 排序）**
+**（2）排序类工作负载：sortBy**
 
-以第一列 `id` 为 key 进行排序：
+用于测试 Spark 在全局排序场景下的 Shuffle 行为。
 
-```python
-rdd = sc.textFile("file:///home/spark/data/data_XX.csv")
-out = rdd.sortBy(lambda x: int(x.split(",")[0]))
-out.count()
+处理流程：
+
+```scala
+val data = sc.textFile(input)
+val sorted = data.sortBy { line =>
+    line.split(",")(0).toInt   // 按 id 排序
+}
+sorted.saveAsTextFile(output)
 ```
 
-特点：
+这样处理的特点是：
 
-* `id` 单调递增，排序操作会触发完整的 Shuffle 阶段；
-* Sort Shuffle 在排序场景中更具优势；
-* Hash Shuffle 在排序下会产生额外步骤，性能可能更弱。
+- `sortBy` 必然触发全局 Shuffle，将所有记录重新分布到有序分区；
+- 整体 Shuffle I/O 更大，能体现 Sort Shuffle 在排序场景的优势。
 
-此任务主要用于评估两种 Shuffle 算法在 **排序类操作** 下的表现差异。
+此 workload 用于测试 **排序类 Shuffle** 的性能特征。
 
 ---
 
-## **3. Shuffle 模式切换方法**
+#### 3. Shuffle 策略测试
 
-两种 Shuffle 模式通过 Spark 配置切换：
+我们为上述两个 workload 分别测试：
 
-### ✔ Hash Shuffle
+- Hash Shuffle + reduce
+- Sort Shuffle + reduce
+- Hash Shuffle + sort
+- Sort Shuffle + sort
+
+这四种组合覆盖了 Spark 中最常见的 Shuffle 场景。
+
+## 实验步骤
+
+本实验基于三节点 Spark Standalone 集群（1 Master + 2 Worker）完成。实验主要包括：环境部署、数据集生成、测试程序打包、分布式作业运行以及结果记录。关键步骤如下：
+
+#### 1. 部署 Spark Standalone 集群
+
+在三台云服务器上安装 JDK 1.8 与 Spark 1.6.3，并配置 Master 与 Worker 的启动脚本。
+
+- 在 master 节点执行：
+
+```bash
+$ jps
+6944 Jps
+1575 Master
+```
+
+- 在 worker1 节点执行：
+
+```bash
+$ jps
+3558 Jps
+1177 Worker
+```
+
+- 在 worker2 节点执行：
+
+```bash
+$ jps
+1178 Worker
+3563 Jps
+```
+
+如下图所示：
+
+![](images/1.png)
+
+Spark 集群启动成功后，可通过浏览器访问 Spark UI：
 
 ```
---conf spark.shuffle.manager=hash
+ssh -L 18081:localhost:8080 spark-master
+http://localhost:18081
 ```
 
-### ✔ Sort Shuffle（默认）
+打开后可以看出集群已成功部署：
 
-```
---conf spark.shuffle.manager=sort
-```
-
-为了保持实验可重复性，所有其他参数保持一致，仅更换 Shuffle 模式。
+![](images/2.png)
 
 ---
+
+#### 2. 生成不同规模的数据集
+
+根据实验要求，使用 Python 脚本自动生成六个不同规模的 CSV 数据集：
+
+| 数据集          | 行数         | 文件大小（约） |
+| ------------ | ---------- | ------- |
+| data_2m.csv  | 2,000,000  | 41 MB   |
+| data_4m.csv  | 4,000,000  | 83 MB   |
+| data_8m.csv  | 8,000,000  | 166 MB  |
+| data_16m.csv | 16,000,000 | 337 MB  |
+| data_32m.csv | 32,000,000 | 685 MB  |
+| data_64m.csv | 64,000,000 | 1.36 GB |
+
+生成脚本示例：
+
+```bash
+python3 gen_data.py 8000000  data_8m.csv
+```
+
+所有数据集均存放于：
+
+```
+/home/spark/data/
+```
+
+可截图数据目录内容，证明数据已准备就绪。
+
+---
+
+#### 3. 编写并打包 Shuffle 测试程序
+
+实验测试的主体程序 ShuffleTest 使用 Scala 编写，包含两类工作负载：
+
+* **reduce**：使用 reduceByKey 触发 Shuffle
+* **sort**：使用 sortBy 触发全局排序
+
+并按照如下方式加入可读性极强的实验名称：
+
+```
+ShuffleTest-[shuffleManager]-[workload]-[datasetSize]
+```
+
+使用 sbt 进行构建：
+
+```bash
+./build.sh
+```
+
+构建后生成 JAR 文件：
+
+```
+target/scala-2.10/shuffle-test_2.10-0.1.jar
+```
+
+可截图 build 成功、JAR 生成位置等内容。
+
+---
+
+#### 4. 运行 run_all.sh 自动化实验脚本
+
+实验使用统一脚本自动执行所有组合：
+
+* Shuffle manager：`hash`、`sort`
+* Workload：`reduce`、`sort`
+* Dataset：2m–64m
+
+脚本示例：
+
+```bash
+./run_all.sh
+```
+
+脚本会依次提交 24 个实验任务，并将输出写入：
+
+```
+/home/spark/results/
+```
+
+可截图终端运行过程，证明实验确实在用户 spark 环境中执行。
+
+---
+
+#### 5. 查看作业执行情况
+
+所有作业执行完成后，可在 Spark History Server 查看任务执行情况：
+
+访问地址：
+
+```
+http://<master-ip>:18080/
+```
+
+在 Completed Applications 页面可看到如下任务名称：
+
+```
+ShuffleTest-hash-reduce-8m
+ShuffleTest-sort-sort-16m
+ShuffleTest-hash-sort-32m
+...
+```
+
+均显示为：
+
+```
+State: FINISHED
+```
+
+可截图该页面，证明实验真实执行且全部成功完成。
+
+---
+
+#### 6. 检查输出结果是否正确生成
+
+使用如下命令检查所有结果目录是否包含 part 文件：
+
+```bash
+for d in /home/spark/results/*; do
+  echo "$d:"
+  ls $d/part-*
+done
+```
+
+所有结果均成功写出，可进一步截图证明数据已生成。
+
+---
+
 

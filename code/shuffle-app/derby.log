@@ -1,0 +1,13 @@
+----------------------------------------------------------------
+Wed Dec 03 20:49:07 CST 2025:
+Booting Derby version The Apache Software Foundation - Apache Derby - 10.12.1.1 - (1704137): instance a816c00e-019a-e442-62e9-000010d13f38 
+on database directory /home/spark/shuffle-app/metastore_db with class loader org.apache.spark.sql.hive.client.IsolatedClientLoader$$anon$1@1259b2a5 
+Loaded from file:/home/spark/spark-1.6.3/lib/spark-assembly-1.6.3-hadoop2.6.0.jar
+java.vendor=Private Build
+java.runtime.version=1.8.0_472-8u472-ga-1~22.04-b08
+user.dir=/home/spark/shuffle-app
+os.name=Linux
+os.arch=amd64
+os.version=5.15.0-100-generic
+derby.system.home=null
+Database Class Loader started - derby.database.classpath=''

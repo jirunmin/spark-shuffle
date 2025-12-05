@@ -1,0 +1,27 @@
+[0m[[0m[0mdebug[0m] [0m[0mPackaging /home/spark/shuffle-app/target/scala-2.10/shuffle-test_2.10-0.1.jar ...[0m
+[0m[[0m[0mdebug[0m] [0m[0mInput file mappings:[0m
+[0m[[0m[0mdebug[0m] [0m[0m	ShuffleTest$.class[0m
+[0m[[0m[0mdebug[0m] [0m[0m	  /home/spark/shuffle-app/target/scala-2.10/classes/ShuffleTest$.class[0m
+[0m[[0m[0mdebug[0m] [0m[0m	ShuffleTest.class[0m
+[0m[[0m[0mdebug[0m] [0m[0m	  /home/spark/shuffle-app/target/scala-2.10/classes/ShuffleTest.class[0m
+[0m[[0m[0mdebug[0m] [0m[0m	org[0m
+[0m[[0m[0mdebug[0m] [0m[0m	  /home/spark/shuffle-app/target/scala-2.10/classes/org[0m
+[0m[[0m[0mdebug[0m] [0m[0m	org/example[0m
+[0m[[0m[0mdebug[0m] [0m[0m	  /home/spark/shuffle-app/target/scala-2.10/classes/org/example[0m
+[0m[[0m[0mdebug[0m] [0m[0m	org/example/ShuffleTest$.class[0m
+[0m[[0m[0mdebug[0m] [0m[0m	  /home/spark/shuffle-app/target/scala-2.10/classes/org/example/ShuffleTest$.class[0m
+[0m[[0m[0mdebug[0m] [0m[0m	org/example/ShuffleTest.class[0m
+[0m[[0m[0mdebug[0m] [0m[0m	  /home/spark/shuffle-app/target/scala-2.10/classes/org/example/ShuffleTest.class[0m
+[0m[[0m[0mdebug[0m] [0m[0m	org/example/ShuffleTest$$anonfun$2.class[0m
+[0m[[0m[0mdebug[0m] [0m[0m	  /home/spark/shuffle-app/target/scala-2.10/classes/org/example/ShuffleTest$$anonfun$2.class[0m
+[0m[[0m[0mdebug[0m] [0m[0m	org/example/ShuffleTest$$anonfun$1.class[0m
+[0m[[0m[0mdebug[0m] [0m[0m	  /home/spark/shuffle-app/target/scala-2.10/classes/org/example/ShuffleTest$$anonfun$1.class[0m
+[0m[[0m[0mdebug[0m] [0m[0m	org/example/ShuffleTest$$anonfun$3.class[0m
+[0m[[0m[0mdebug[0m] [0m[0m	  /home/spark/shuffle-app/target/scala-2.10/classes/org/example/ShuffleTest$$anonfun$3.class[0m
+[0m[[0m[0mdebug[0m] [0m[0m	ShuffleTest$$anonfun$2.class[0m
+[0m[[0m[0mdebug[0m] [0m[0m	  /home/spark/shuffle-app/target/scala-2.10/classes/ShuffleTest$$anonfun$2.class[0m
+[0m[[0m[0mdebug[0m] [0m[0m	ShuffleTest$$anonfun$1.class[0m
+[0m[[0m[0mdebug[0m] [0m[0m	  /home/spark/shuffle-app/target/scala-2.10/classes/ShuffleTest$$anonfun$1.class[0m
+[0m[[0m[0mdebug[0m] [0m[0m	ShuffleTest$$anonfun$3.class[0m
+[0m[[0m[0mdebug[0m] [0m[0m	  /home/spark/shuffle-app/target/scala-2.10/classes/ShuffleTest$$anonfun$3.class[0m
+[0m[[0m[0mdebug[0m] [0m[0mDone packaging.[0m
