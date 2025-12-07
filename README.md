@@ -395,13 +395,13 @@ done
 
 #### 图表解读
 
-上图展示了随数据量增长（2 million rows $\rightarrow$ 64 million rows），四种 Shuffle 策略的耗时变化趋势。
+上图展示了随数据量增长（2M $\rightarrow$ 64M），四种 ShufMfle 策略的耗时变化趋势。
 
 ###### （1）聚合类负载 (Reduce Workload) 对比趋势
 
 - **耗时表现**：hash-reduce（蓝色曲线）的耗时均低于 sort-reduce（橙色曲线）的耗时。
 
-- **差异**：在所有数据规模下，Hash Shuffle 均优于 Sort Shuffle。例如在 64 million rows 数据规模下，hash-reduce 耗时约 33秒，而 sort-reduce 耗时约 40秒。
+- **差异**：在所有数据规模下，Hash Shuffle 均优于 Sort Shuffle。例如在 64M 数据规模下，hash-reduce 耗时约 33秒，而 sort-reduce 耗时约 40秒。
 
 - **原因分析**：Hash Shuffle 在 Shuffle Write 阶段直接根据 Key 的 Hash 值将数据写入对应的 Bucket 文件，不需要在 Map 端进行排序。Sort Shuffle 强制在 Map 端对数据进行排序，引入了额外的 CPU 和内存开销。
 
@@ -409,7 +409,7 @@ done
 
 - **耗时表现**：hash-sort（绿色曲线）与 sort-sort（红色曲线）耗时最高，且增长斜率最陡。
 
-- **差异**：两者性能几乎重叠，差异微乎其微（在64 million rows下约 80秒）。
+- **差异**：两者性能几乎重叠，差异微乎其微（在64M下约 80秒）。
 
 - **原因分析**：对于 sortBy 操作，无论使用哪种 Shuffle Manager，Spark 都必须在 Reduce 端进行全局归并排序。此时，作业的主要瓶颈在于全量数据的网络传输和排序计算，Shuffle Manager 内部机制带来的差异被排序算子的操作覆盖了。
 
@@ -425,11 +425,11 @@ done
 
 #### 图表解读
 
-- **Sort Workload (红色/橙色)**：写出数据量极大，且与输入数据量呈严格的线性关系（Slope $\approx$ 1）。对于 64000000 行数据（约 1.4GB），Shuffle Write 也接近 1.3GB - 1.4GB。
+- **Sort Workload (红色/橙色)**：写出数据量极大，且与输入数据量呈严格的线性关系（Slope $\approx$ 1）。对于 64M 行数据（约 1.4GB），Shuffle Write 也接近 1.3GB - 1.4GB。
 
   - **原因**：sortBy 操作需要对所有数据进行全局排序，无法在 Map 端进行预聚合（Combine），因此所有记录都必须写入磁盘并传输。
 
-- **Reduce Workload (蓝色/绿色)**：写出数据量显著降低。对于 64000000 行数据，Shuffle Write 仅为 0.2GB 左右。
+- **Reduce Workload (蓝色/绿色)**：写出数据量显著降低。对于 64M 行数据，Shuffle Write 仅为 0.2GB 左右。
 
   - **原因**：reduceByKey 触发了 Map-side Combine（Map 端预聚合）。大量具有相同 Key 的数据在写入磁盘前已被聚合，极大减少了写入磁盘的数据量。
 
