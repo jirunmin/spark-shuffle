@@ -354,5 +354,65 @@ done
 所有结果均成功写出，可进一步截图证明数据已生成。
 
 ---
+## 实验结果与分析
 
+基于上述实验步骤，我们对生成的 2M 至 64M 不同规模的数据集进行了 Hash Shuffle 与 Sort Shuffle 的性能对比。以下是对执行时间与 I/O 吞吐量的详细分析。
+
+#### 1. 执行时间分析 (Execution Time)
+
+我们首先对比了四种组合在不同数据规模下的总执行时间（Duration）。
+
+![](images/duration_s.png)
+
+###### 图表解读
+
+上图展示了随数据量增长（2M $\rightarrow$ 64M），四种 Shuffle 策略的耗时变化趋势。
+
+###### （1）聚合类负载 (Reduce Workload) 对比趋势
+
+- **耗时表现**：hash-reduce（蓝色曲线）与 sort-reduce（橙色曲线）的耗时均远低于排序类负载。
+- **差异**：在所有数据规模下，Hash Shuffle 均优于 Sort Shuffle。例如在 64M 数据规模下，hash-reduce 耗时约 33秒，而 sort-reduce 耗时约 40秒。
+- **原因分析**：Hash Shuffle 在 Shuffle Write 阶段直接根据 Key 的 Hash 值将数据写入对应的 Bucket 文件，不需要在 Map 端进行排序。Sort Shuffle 强制在 Map 端对数据进行排序（即使是 reduceByKey 这种不需要全局有序的操作），引入了额外的 CPU 和内存开销。
+
+###### （2）排序类负载 (Sort Workload) 对比趋势
+
+- **耗时表现**：hash-sort（绿色曲线）与 sort-sort（红色曲线）耗时最高，且增长斜率最陡。
+- **差异**：两者性能几乎重叠，差异微乎其微（约 80秒）。
+- **原因分析**：对于 sortBy 操作，无论使用哪种 Shuffle Manager，Spark 都必须在 Reduce 端进行全局归并排序。此时，作业的主要瓶颈在于全量数据的网络传输和排序计算，Shuffle Manager 内部机制带来的差异被昂贵的排序操作掩盖了。
+
+#### 2. Shuffle I/O 数据量分析
+为了深入理解性能差异的来源，我们进一步分析了 Shuffle 过程中的磁盘写（Write）和读（Read）的数据量。
+
+#### 2.1 Shuffle Write Volume
+
+![](images/shuffle_write.png)
+
+###### 图表解读
+
+- **Sort Workload (红色/隐没的橙色)**：写出数据量极大，且与输入数据量呈严格的线性关系（Slope $\approx$ 1）。对于 64M 行数据（约 1.4GB），Shuffle Write 也接近 1.3GB - 1.4GB。
+  - **原因**：sortBy 操作需要对所有数据进行全局排序，无法在 Map 端进行预聚合（Combine），因此所有记录都必须写入磁盘并传输。
+- **Reduce Workload (蓝色/绿色)**：写出数据量显著降低。对于 64M 行数据，Shuffle Write 仅为 0.2GB 左右。
+  - **原因**：reduceByKey 触发了 Map-side Combine（Map 端预聚合）。大量具有相同 Key 的数据在写入磁盘前已被聚合，极大减少了落盘的数据量。
+- **Hash vs Sort (在 Reduce 场景)**：仔细观察可见，hash-reduce（蓝色）产生的 Write Volume 略高于 sort-reduce（绿色）。
+  - **原因**：这可能是因为 Sort Shuffle 在溢写磁盘时生成的临时文件结构或序列化方式在处理大量碎片化数据时，相比 Hash Shuffle 生成的非排序文件具有微小的存储效率优势，或者 Hash Shuffle 产生了更多的文件碎片导致了元数据统计上的差异。
+
+#### 2.2 Shuffle Read Volume
+
+![](images/shuffle_read.png)
+
+#### 图表解读
+
+Shuffle Read 的趋势与 Shuffle Write 高度一致。sort-sort 需要通过网络拉取全量数据，网络 I/O 压力最大。hash-reduce 和 sort-reduce 仅需拉取聚合后的数据，网络 I/O 压力较小。这再次印证了为何聚合类负载的执行时间远快于排序类负载。
+
+#### 3. 实验结论
+
+综合执行时间与 I/O 监控数据，本实验得出以下结论：
+
+1. **Hash Shuffle 在聚合场景具有性能优势**：在不需要结果排序的场景（如 reduceByKey）下，Hash Shuffle 省去了 Map 端的排序开销，在 64M 数据规模下比 Sort Shuffle 快约 17.5%。这也是早期 Spark 版本默认使用 Hash Shuffle 的主要原因。
+
+2. **Sort Shuffle 在大数据量下更具稳定性**（虽然本实验未达到该瓶颈）：虽然 Hash Shuffle 更快，但其机制会产生大量中间文件（$M \times R$ 个文件）。在本实验的 2M~64M 规模下，文件句柄数尚未成为瓶颈，因此 Hash Shuffle 表现优异。但在生产环境海量数据下，Hash Shuffle 的文件数量爆炸会导致内存溢出或随机 IO 问题，而 Sort Shuffle 通过文件合并（Sort-Merge）机制解决了这一问题。
+
+3. **Map-side Combine 至关重要**：实验清晰展示了 reduceByKey 相比 sortBy 在 I/O 上的巨大优势（减少约 85% 的 Shuffle 数据量）。在开发 Spark 应用时，应尽可能使用支持 Map 端预聚合的算子。
+
+4. **排序操作主要受限于 I/O 与计算**：当业务逻辑需要全局排序（sortBy）时，Shuffle Manager 的选择对总时长的影响几乎可以忽略不计。
 
