@@ -435,33 +435,75 @@ done
 
 ## 实验结果与分析
 
-基于上述实验步骤，我们对生成的不同规模的数据集进行了 Hash Shuffle 与 Sort Shuffle 的性能对比。以下是对执行时间与 I/O 吞吐量的详细分析。
+基于上述实验步骤，我们对生成的不同规模的数据集进行了 Hash Shuffle 与 Sort Shuffle 的各种性能对比。
 
 ### 1. 执行时间分析 (Execution Time)
 
-我们首先对比了六种组合在不同数据规模下的总的Shuffle执行时间（Duration）。
+本实验在不同规模（2M–64M）的数据集上，对 Hash Shuffle 与 Sort Shuffle 在三类工作负载（reduce、sort、sort-skew）下的运行时间进行了测试，并绘制了相应的趋势图与分组柱状图。从图中可以观察到如下规律与差异。
+
+**(1) reduce 工作负载：Hash Shuffle 始终快于 Sort Shuffle**
+
+![](images/plot_reduce.png)
+
+在 reduceByKey 场景中，shuffle 的核心操作是“按 key 聚合”。实验结果显示：
+
+- Hash Shuffle 全程运行时间更低，优势随数据规模扩大而更加明显；
+- 在数据量较小（2M–8M）时，两者差异不大；
+- 当规模提升至 64M，Hash Shuffle 仅约 35s，而 Sort Shuffle 约 44s，性能差距达到 25% 以上。
+
+原因分析：
+- ReduceByKey 主要依赖“按 key 分桶 + 聚合”，无须排序；
+- Hash Shuffle 直接通过哈希分区得到目标分组，开销更小；
+- Sort Shuffle 引入了额外的排序与归并步骤，因此在该类 workload 下不占优势。
+
+**(2) sort 工作负载：Hash 与 Sort Shuffle 性能几乎一致**
+
+![](images/plot_sort.png)
+
+在对 id 进行全局 sortBy 时：
+
+- Hash Shuffle 与 Sort Shuffle 的运行曲线几乎重合；
+- 随数据规模线性增长，但两者差距通常小于 5%；
+
+原因分析：
+
+- SortBy 本质是全局排序任务，其主导成本是 排序开销；
+- 无论使用 Hash 还是 Sort Shuffle，最终都需要经过多次排序与合并；
+- 因此 Shuffle 类型对该 workload 的影响非常有限。
+
+**(3) sort-skew 工作负载：数据倾斜导致性能急剧恶化**
+
+![](images/plot_sort-skew.png)
+
+在 skew 版本的 sortBy 工作负载中：
+
+- 运行时间随数据规模急剧上升，增长速度远超前两类 workload；
+- 在 64M 时，排序运行时间达到 145 秒以上，比正常 sort 版本高出 约 60%+；
+- Hash 与 Sort Shuffle 在倾斜场景下表现非常接近，二者差异不大。
+
+原因分析：
+
+- sort-skew 通过倾斜 key 的分布，导致某些 Task 接收了远多于其它 Task 的数据；
+- 即便 ShuffleManager 不同，极端倾斜都会导致单点 Task 变成全局瓶颈；
+- Sorting 是 CPU 密集型操作，面对数倍以上的数据量，耗时呈线性甚至超线性上升。
 
 ![](images/duration_plot.png)
 
-#### 图表解读
+**(4) 分组柱状图总结三类 workload 的整体趋势**
 
-上图展示了随数据量增长（2M $\rightarrow$ 64M），四种 ShufMfle 策略的耗时变化趋势。
+![](images/plot_bar.png)
 
-###### （1）聚合类负载 (Reduce Workload) 对比趋势
+综合所有数据规模后：
 
-- **耗时表现**：hash-reduce（蓝色曲线）的耗时均低于 sort-reduce（橙色曲线）的耗时。
+- reduce 工作负载最轻量，运行时间最短（10–40s）；
+- sort 工作负载居中（12–90s），并与 shuffle 类型无强相关；
+- sort-skew 最重（10–145s），在大数据集上成为性能瓶颈；
+- 工作负载差异远大于 Shuffle 算法差异。
 
-- **差异**：在所有数据规模下，Hash Shuffle 均优于 Sort Shuffle。例如在 64M 数据规模下，hash-reduce 耗时约 33秒，而 sort-reduce 耗时约 40秒。
+这表明：
 
-- **原因分析**：Hash Shuffle 在 Shuffle Write 阶段直接根据 Key 的 Hash 值将数据写入对应的 Bucket 文件，不需要在 Map 端进行排序。Sort Shuffle 强制在 Map 端对数据进行排序，引入了额外的 CPU 和内存开销。
-
-###### （2）排序类负载 (Sort Workload) 对比趋势
-
-- **耗时表现**：hash-sort（绿色曲线）与 sort-sort（红色曲线）耗时最高，且增长斜率最陡。
-
-- **差异**：两者性能几乎重叠，差异微乎其微（在64M下约 80秒）。
-
-- **原因分析**：对于 sortBy 操作，无论使用哪种 Shuffle Manager，Spark 都必须在 Reduce 端进行全局归并排序。此时，作业的主要瓶颈在于全量数据的网络传输和排序计算，Shuffle Manager 内部机制带来的差异被排序算子的操作覆盖了。
+- 工作负载类型（是否存在排序、是否存在数据倾斜）决定主要性能差异；
+- Shuffle 算法（Hash vs Sort）只在 reduce 工作负载下产生明显影响。
 
 ---
 
@@ -469,40 +511,147 @@ done
 
 为了深入理解性能差异的来源，我们进一步分析了 Shuffle 过程中的磁盘写（Write）和读（Read）的数据量。
 
-#### 2.1 Shuffle Write Volume
-
-![](images/shuffle_write.png)
-
-#### 图表解读
-
-- **Sort Workload (红色/橙色)**：写出数据量极大，且与输入数据量呈严格的线性关系（Slope $\approx$ 1）。对于 64M 行数据（约 1.4GB），Shuffle Write 也接近 1.3GB - 1.4GB。
-
-  - **原因**：sortBy 操作需要对所有数据进行全局排序，无法在 Map 端进行预聚合（Combine），因此所有记录都必须写入磁盘并传输。
-
-- **Reduce Workload (蓝色/绿色)**：写出数据量显著降低。对于 64M 行数据，Shuffle Write 仅为 0.2GB 左右。
-
-  - **原因**：reduceByKey 触发了 Map-side Combine（Map 端预聚合）。大量具有相同 Key 的数据在写入磁盘前已被聚合，极大减少了写入磁盘的数据量。
-
-- **Hash vs Sort (在 Reduce 场景)**：hash-reduce（蓝色）产生的 Write Volume 略高于 sort-reduce（绿色）。
-
-  - **原因**：是因为 Sort Shuffle 在溢写磁盘时生成的临时文件结构或序列化方式在处理大量碎片化数据时，相比 Hash Shuffle 生成的非排序文件具有微小的存储效率优势，或者 Hash Shuffle 产生了更多的文件碎片导致了元数据统计上的差异，同样这也印证了spark两种Shuffle机制的不同。
-
-#### 2.2 Shuffle Read Volume
+#### 2.1 Shuffle Read 数据量：整体呈现线性随数据规模增长
 
 ![](images/shuffle_read.png)
 
-#### 图表解读
+在 Shuffle Read 可视化结果中可以观察到以下现象：
 
-Shuffle Read 的趋势与 Shuffle Write 高度一致。sort-sort 需要通过网络拉取全量数据，网络 I/O 压力最大。hash-reduce 和 sort-reduce 仅需拉取聚合后的数据，网络 I/O 压力较小。这再次印证了聚合类负载的执行时间远快于排序类负载。
+**(1) sort-sort / sort-sort-skew 的 Shuffle Read 量显著高于其他组合**
+
+- 两条曲线（紫色、棕色）随着数据规模呈近似线性增长，最大读量接近 **950 MB**。
+- 且 hash-sort 与 sort-sort 的读量几乎完全重叠，说明：
+
+  - 在全局排序类 workload 中，Shuffle 数据量主要由排序算法本身决定，而非 ShuffleManager。
+- 对于 sort-skew，Shuffle Read 量也呈线性，但略低于 sort-sort。
+
+**(2) reduce 类工作负载的 Shuffle Read 明显更小**
+
+- 无论 hash-reduce 或 sort-reduce，都呈现明显低于 sort / sort-skew 的读量，最大约 **200 MB 左右**。
+- reduce 工作负载只对 key 进行聚合，其 shuffle 数据量主要受 key 分布和 reducer 数影响，而不是全量排序。
+
+**(3) hash 与 sort 在 reduce 与 sort-skew 上差异很小**
+
+- 在 reduce、sort-skew 两类 workload 中，Hash Shuffle 与 Sort Shuffle 的 read 数据量几乎重合。
+- 表明在这些场景下，Spark 的 ShuffleManager 类型不会改变读入数据的规模。
 
 ---
 
-### 3. 实验结论
+#### 2.2 Shuffle Write 数据量：与 Read 的趋势基本一致
 
-综合执行时间与 I/O 监控数据，本实验得出以下结论：
+![](images/shuffle_write.png)
 
-1. **Hash Shuffle 在聚合场景具有性能优势**：在不需要结果排序的场景（如 reduceByKey）下，Hash Shuffle 省去了 Map 端的排序开销，在本实验最大的数据规模下比 Sort Shuffle 快约 17.5%。
+Shuffle Write 的图像与 Shuffle Read 的趋势高度一致，表明 Shuffle 的输入输出规模整体对称：
 
-2. **Sort Shuffle 在大数据量下更具稳定性**：虽然 Hash Shuffle 更快，但其机制会产生大量中间文件（**MR** 个文件）。在本实验的 2M~64M 规模下，Hash Shuffle 的文件数量多与Sort Shuffle，Shuffle Write的时间也印证了Hash机制需要更多的时间将文件写入磁盘，而 Sort Shuffle 通过文件合并（Sort-Merge）机制解决了这一问题，在更大规模的数据集下，Sort机制可以显著减少Shuffle数据量，在磁盘大小有限的前提下，比Hash机制更具优势。
+**(1) sort-sort、sort-sort-skew 写出量最大**
+
+- 最大写出量同样接近 **950 MB**。
+- 线性变化趋势明显，与数据规模几乎成正比。
+
+**(2) reduce 类任务写出量最小**
+
+- 最高约 **180–200 MB**。
+- 尤其在小数据集上，写出量非常小，符合 reduce 操作的局部聚合特性。
+
+**(3) hash 与 sort 的差异同样非常接近**
+
+- 除个别点因插值导致略微偏移外，两者在所有 workload 的写出规模上几乎重叠。
+- 提示 ShuffleManager 类型对数据规模本身影响不大，更主要影响 I/O 行为与磁盘使用方式。
+
+---
+
+#### 2.3. sort / sort-skew 远大于 reduce
+
+从结果可观察到：
+
+- 全局排序（sort）与倾斜排序（sort-skew）的 Shuffle 数据量均远高于 reduce。
+- 数据倾斜（skew）并未显著增加 Shuffle 数据量，但会导致运行时间增加（前面时间分析部分已显示）。
+
+这说明不同 workload 的 Shuffle 逻辑导致了不同的数据重分布规模，而 ShuffleManager（hash/sort）本身并不会改变 Shuffle 数据量的大小。
+
+---
+
+### 3. Shuffle Spill 实验结果与分析
+
+接下来进一步从 Shuffle Spill 的角度，对比分析 Hash Shuffle 与 Sort Shuffle 在不同数据规模和不同 workload 下的资源使用情况。Spill 是指当 shuffle 过程需要的内存超过阈值时，Spark 会将部分中间数据写入磁盘或以溢出的方式进行管理，因此其发生情况与 shuffle 算法的内存模式密切相关。
+
+本实验主要观测两个指标：
+
+- Shuffle Spill (Memory)：溢写到内存的中间数据量
+- Shuffle Spill (Disk)：溢写到磁盘的中间数据量
+
+#### 3.1 reduce workload：Hash 与 Sort 均无 Spill
+
+![](images/spill_reduce.png)
+
+在 `reduce` workload 中，无论采用 Hash Shuffle 还是 Sort Shuffle，所有数据规模下的 Memory Spill 和 Disk Spill 均为 0。
+
+这一现象说明：
+
+- reduce 工作负载在实现上不依赖 shuffle 大量聚合键值；
+- 分区数量适配内存配置，执行过程中不会出现内存压力导致的溢写行为。
+
+#### 3.2 sort workload：Hash Shuffle 在大数据规模下出现显著 Spill
+
+![](images/spill_sort.png)
+
+在 `sort` workload 中，Sort Shuffle 在所有规模下均 没有发生 Spill（memory/disk 均为 0 MB）。
+
+相比之下，Hash Shuffle 在大数据规模（尤其是 16m、32m）中出现明显 Spill：
+
+- 16m 数据规模出现约 260 MB 级别的 Memory Spill 与 31 MB Disk Spill
+- 32m 数据规模上进一步扩大至约 270 MB Memory Spill / 31 MB Disk Spill
+
+这表明 Hash Shuffle 在排序相关 workload 中的内存占用更高。当数据规模增大时，其内存结构（基于 hash 分桶）导致溢写，而 Sort Shuffle 因为使用外排序模式，能够将中间结果有序写入磁盘，其内存压力更小。
+
+#### 3.3 sort-skew workload：Hash 与 Sort 均出现大规模 Spill
+
+![](images/spill_sort-skew.png)
+
+在 skew（数据倾斜）场景下，两种 shuffle 策略都发生了明显的 Spill，但表现不同：
+
+**Sort Shuffle**
+- Memory Spill 随数据规模线性增长，从约 520 MB（8m）到 3300 MB（32m）
+- Disk Spill 也持续增长，从约 45 MB 到约 280 MB
+
+**Hash Shuffle**
+
+- 8m 时与 Sort 数值完全一致
+- 16m 时 Memory Spill 略低于 Sort（约 1349 MB vs 1645 MB）
+- 32m 时两者几乎一致（3300 MB 级别）
+
+整体来看，在高倾斜场景下无论使用 Hash 还是 Sort Shuffle，都需要处理大量不均匀 key 的 shuffle 数据，因此 Spill 成为必然现象。
+
+两者的数值非常接近，说明数据倾斜对 Shuffle 行为的影响压过了算法本身的结构差异。
+
+
+
+## 实验结论
+
+通过在不同数据规模和不同工作负载（reduce、sort、sort-skew）下对 Hash Shuffle 与 Sort Shuffle 的执行时间、Shuffle I/O 数据量以及 Shuffle Spill 行为进行系统性测试，可以得出如下总体结论：
+
+首先，**Shuffle 的性能主要受到工作负载特性的影响，而非 Shuffle 算法本身。** 在 reduce 类任务中，由于仅需按 key 聚合、无需排序，Hash Shuffle 能以更低的 CPU 与 I/O 开销完成计算，因此表现出显著的性能优势。相应地，Hash Shuffle 更适用于聚合型工作负载（如 reduceByKey、aggregateByKey），尤其在数据规模进一步增大时，其优势更加突出。
+
+其次，**在排序类任务中（sort 工作负载），Hash Shuffle 与 Sort Shuffle 的性能几乎一致。** 这是因为全局排序的主要成本来自排序过程本身，而非 Shuffle 管理方式，因此 ShuffleManager 对执行时间与 Shuffle 数据量的影响被弱化。在此类任务中，Sort Shuffle 的外排序机制能够保持较低的内存压力，因此更适合 大规模排序任务（如 sortBy、orderBy），具有更稳定的执行特性。
+
+再次，**在数据倾斜场景（sort-skew）下，两种 Shuffle 都出现了显著的性能退化。** 无论使用 Hash Shuffle 或 Sort Shuffle，运行时间、Spill 行为均大幅增加，且二者差异极小。这说明性能瓶颈完全源自数据倾斜本身，而非 Shuffle 算法选择。因此在此类场景中，应优先考虑 缓解数据倾斜的策略（如加盐、重新分区、map-side 聚合等），而不是依赖 ShuffleManager 的切换。
+
+综合上述实验结果，可以给出如下适用场景建议：
+
+- `Hash Shuffle`： 适用于无需排序、需要高效分组与聚合的任务，是 reduceByKey 等聚合型 workload 的最优选择。
+- `Sort Shuffle`： 更适合带有全量排序需求或大规模 Shuffle 的场景，其内存溢写更可控、执行更稳定。
+- 两者均难以改善的场景： 对于存在严重 key 倾斜的任务，Shuffle 算法差异被倾斜效应掩盖，需要从数据分布角度进行优化。
+
+总体而言，Shuffle 算法的选择应基于任务类型而非单一性能指标：聚合选 Hash，排序选 Sort；若出现倾斜，则应优先治理倾斜本身。
+
    
 ---
+
+## 分工
+
+52305903003 文羽昕：实验环境部署、参数切换、运行 Spark 任务 25%
+51285903047 赵欣雨：理论部分:shuffle 原理、Hash vs Sort、撰写分析与结论 25%
+51285903121 季润民：数据收集、绘图、最后整合报告 25%
+51285903122 樊骁斌：制作汇报PPT与答辩视频 25%
+
+
