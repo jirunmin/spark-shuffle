@@ -93,10 +93,14 @@ id,rand1,rand2
 
 其中：
 
-* `id` 为行号，单调递增；
-* `rand1`、`rand2` 为 0 $\sim$ 1,000,000 的均匀随机整数。
+- `id`: 从 0 递增，可作为排序场景的 key；
+- `rand1`: 0～1,000,000 的均匀随机整数，主要用于 reduce 工作负载；
+- `rand2`: 被人为构造为高度倾斜，用于验证 Spark Shuffle 在数据倾斜场景下的行为。
 
-这种结构能够方便构造基于键（key）的 Shuffle 工作负载，用于测试 Hash Shuffle 与 Sort Shuffle 在不同数据规模下的性能差异。
+这样设计的目的是：
+
+- 普通负载（reduce / sort）可在无倾斜干扰下对比 Hash 与 Sort Shuffle 的差异；
+- 倾斜负载可观测 Hash Shuffle 的退化现象，以及 Sort Shuffle 在倾斜下的性能变化。
 
 根据实验需求，生成了六个不同规模的数据集，分别包含 2M、4M、8M、16M、32M、64M 条记录，文件大小从约 41MB 到 1.4GB 不等：
 
@@ -115,13 +119,19 @@ id,rand1,rand2
 
 #### 2. 工作负载
 
-为了对比 Hash Shuffle 与 Sort Shuffle 的性能，本实验选取两类典型的 Shuffle-heavy 操作：**聚合类 Shuffle（reduceByKey）** 和 **排序类 Shuffle（sortBy）**。这两类操作都会触发 Spark 在不同 Worker 之间重新分发数据，从而充分体现 Shuffle 算法性能差异。
+为了对比 Hash Shuffle 与 Sort Shuffle 在不同场景下的表现，本实验设计了三类典型的 Shuffle-heavy 工作负载：
+
+- reduce：均匀聚合型 Shuffle
+- sort：均匀排序型 Shuffle
+- sort-skew：带数据倾斜的排序型 Shuffle
+
+三类 workload 的核心代码都封装在同一个 `ShuffleTest` 程序中，通过命令行参数指定 `shuffleManager`（hash / sort）和 `workload`（reduce / sort），再配合不同的数据集文件来触发对应场景。
 
 ---
 
 **（1）聚合类工作负载：reduceByKey**
 
-该工作负载最能反映 Spark 在数据聚合场景的 Shuffle 行为。
+该 workload 用于测试在 **key 均匀分布** 情况下，reduceByKey 聚合引发的 Shuffle 行为。
 
 处理流程如下：
 
@@ -139,16 +149,13 @@ result.saveAsTextFile(output)
 
 - `reduceByKey` 会对相同 key 的 value 进行聚合；
 - 会触发 Shuffle，将相同 key 的记录移动到同一 Reducer；
-- 使用 CSV 中均匀分布的 `rand1` 作为 key，可有效避免数据倾斜；
-- 是 Shuffle 性能评测中最典型的 benchmark。
-
-此 workload 用于测试 **聚合类 Shuffle** 场景下的执行时间与 Shuffle I/O 性能。
+- 使用 CSV 中均匀分布的 `rand1` 作为 key，可有效避免数据倾斜。
 
 ---
 
 **（2）排序类工作负载：sortBy**
 
-用于测试 Spark 在全局排序场景下的 Shuffle 行为。
+该 workload 测试 **全局排序** 在无倾斜条件下的 Shuffle 行为。
 
 处理流程：
 
@@ -163,28 +170,47 @@ sorted.saveAsTextFile(output)
 这样处理的特点是：
 
 - `sortBy` 必然触发全局 Shuffle，将所有记录重新分布到有序分区；
-- 整体 Shuffle I/O 更大，能体现 Sort Shuffle 在排序场景的优势。
-
-此 workload 用于测试 **排序类 Shuffle** 的性能特征。
+- 数据均匀，分区负载较均衡；
+- 用于对比 hash/sort 在标准排序场景下的差异。
 
 ---
 
+**（3）数据倾斜负载：sort-skew**
+
+为观察 Shuffle **在严重数据倾斜场景下** 的表现，我们使用 CSV 中的第三列（`skew_key`）作为聚合 key，其中多数记录具有相同 key，从而人为制造数据倾斜：
+
+```scala
+val sorted = data.sortBy { line =>
+  val arr = line.split(",")
+  arr(2).toInt          // 第三列：专门造倾斜
+}
+sorted.saveAsTextFile(outputPath)
+```
+
+特点：
+
+- 仍然是排序类 workload（sortBy）；
+- 但排序 key 的分布极度不均匀，会造成分区倾斜；
+- 该 workload 会分别跑 `Hash Shuffle` 和 `Sort Shuffle`，用于比较两种 Shuffle 在倾斜场景下的稳定性。
+
 #### 3. Shuffle 策略测试
 
-我们为上述两个 workload 分别测试：
+我们为上述三个 workload 分别测试：
 
 - Hash Shuffle + reduce
 - Sort Shuffle + reduce
 - Hash Shuffle + sort
 - Sort Shuffle + sort
+- Hash Shuffle + sort-skew
+- Sort Shuffle + sort-skew
 
-这四种组合覆盖了 Spark 中最常见的 Shuffle 场景。
+这六种组合覆盖了 Spark 中常见的 Shuffle 场景。
 
 ## 实验步骤
 
 本实验基于三节点 Spark Standalone 集群（1 Master + 2 Worker）完成。实验主要包括：环境部署、数据集生成、测试程序打包、分布式作业运行以及结果记录。关键步骤如下：
 
-#### 1. 部署 Spark Standalone 集群
+### 1. 部署 Spark Standalone 集群
 
 在三台云服务器上安装 JDK 1.8 与 Spark 1.6.3，并配置 Master 与 Worker 的启动脚本。
 
@@ -229,71 +255,83 @@ http://localhost:18081
 
 ---
 
-#### 2. 生成不同规模的数据集
+### 2. 生成不同规模的数据集
 
-根据实验要求，使用 Python 脚本自动生成六个不同规模的 CSV 数据集：
+为评估 Spark Shuffle 在不同数据规模下的性能表现，本实验使用 Python 脚本自动生成六份不同大小的 CSV 数据集。每条记录由三列组成：`id（递增）`、`value（随机）`、`skew_key（用于模拟数据倾斜）`。
 
-| 数据集          | 行数         | 文件大小（约） |
-| ------------ | ---------- | ------- |
-| data_2m.csv  | 2,000,000  | 41 MB   |
-| data_4m.csv  | 4,000,000  | 83 MB   |
-| data_8m.csv  | 8,000,000  | 166 MB  |
-| data_16m.csv | 16,000,000 | 337 MB  |
-| data_32m.csv | 32,000,000 | 685 MB  |
-| data_64m.csv | 64,000,000 | 1.36 GB |
+数据通过统一的生成脚本批量生成。例如，以下命令用于生成 800 万条记录的数据集：
 
 生成脚本示例：
 
 ```bash
-python3 gen_data.py 8000000  data_8m.csv
+python3 generate.py 8000000 /home/spark/data/data_8m.csv
+```
+为了便于实验自动化，本实验进一步编写了批处理脚本（generate.sh），可一次性生成全部 6 个数据集：
+
+```bash
+./generate.sh
 ```
 
-所有数据集均存放于：
+生成的数据集最终统一存放在目录：
 
 ```
 /home/spark/data/
 ```
 
-可截图数据目录内容，证明数据已准备就绪。
+![](images/3.png)
 
 ---
 
-#### 3. 编写并打包 Shuffle 测试程序
+### 3. 编写并打包 Shuffle 测试程序
 
-实验测试的主体程序 ShuffleTest 使用 Scala 编写，包含两类工作负载：
+本实验的核心测试程序 ShuffleTest 使用 Scala 编写，主要用于在不同 ShuffleManager（Hash / Sort）下执行三类 Shuffle-heavy 工作负载：
 
-* **reduce**：使用 reduceByKey 触发 Shuffle
-* **sort**：使用 sortBy 触发全局排序
+- reduce：使用 `reduceByKey` 测试聚合类 Shuffle
+- sort：使用 `sortBy` 测试均匀分布条件下的全局排序
+- sort-skew：使用 `sortBy` 对倾斜字段排序，用于测试数据倾斜场景下的 Shuffle 行为
 
-并按照如下方式加入可读性极强的实验名称：
+程序入口根据命令行参数自动选择 ShuffleManager 与 workload 类型，并为每次运行生成可读性非常强的应用名称：
 
 ```
 ShuffleTest-[shuffleManager]-[workload]-[datasetSize]
 ```
 
-使用 sbt 进行构建：
+例如：
+
+- `ShuffleTest-hash-reduce-8m`
+- `ShuffleTest-sort-sort-32m`
+- `ShuffleTest-hash-sort-skew-64m`
+
+清晰标识了当前运行的 Shuffle 类型、工作负载类型与数据集规模，便于后续日志分析与结果对比。
+
+
+程序使用 sbt 进行构建。在项目根目录执行：
 
 ```bash
 ./build.sh
 ```
 
-构建后生成 JAR 文件：
+脚本会自动调用：
+```
+sbt package
+```
 
+成功构建后，JAR 文件会生成在：
 ```
 target/scala-2.10/shuffle-test_2.10-0.1.jar
 ```
 
-可截图 build 成功、JAR 生成位置等内容。
+![](images/4.png)
 
 ---
 
-#### 4. 运行 run_all.sh 自动化实验脚本
+### 4. 运行 run_all.sh 自动化实验脚本
 
-实验使用统一脚本自动执行所有组合：
+为了避免手动多次提交作业，本实验使用统一的自动化脚本 run_all.sh 来一次性执行所有 Shuffle 组合测试。脚本会覆盖：
 
-* Shuffle manager：`hash`、`sort`
-* Workload：`reduce`、`sort`
-* Dataset：2m–64m
+- Shuffle Manager：`hash`、`sort`
+- Workload 类型：`reduce`、`sort`、`sort-skew`
+- 数据集规模：`2m`, `4m`, `8m`, `16m`, `32m`, `64m`
 
 脚本示例：
 
@@ -301,24 +339,26 @@ target/scala-2.10/shuffle-test_2.10-0.1.jar
 ./run_all.sh
 ```
 
-脚本会依次提交 24 个实验任务，并将输出写入：
+脚本会依次提交 36 个实验任务，并将输出写入：
 
 ```
 /home/spark/results/
 ```
 
-可截图终端运行过程，证明实验确实在用户 spark 环境中执行。
+运行过程如下：
+
+![](images/5.png)
 
 ---
 
-#### 5. 查看作业执行情况
+### 5. 查看作业执行情况
 
 所有作业执行完成后，可在 Spark History Server 查看任务执行情况：
 
 访问地址：
 
 ```
-http://<master-ip>:18080/
+http://localhost:18081/
 ```
 
 在 Completed Applications 页面可看到如下任务名称：
@@ -326,32 +366,41 @@ http://<master-ip>:18080/
 ```
 ShuffleTest-hash-reduce-8m
 ShuffleTest-sort-sort-16m
-ShuffleTest-hash-sort-32m
+ShuffleTest-hash-sort-skew-32m
 ...
 ```
 
-均显示为：
+![](images/6.png)
+
+可以看到均显示为：
 
 ```
 State: FINISHED
 ```
 
-可截图该页面，证明实验真实执行且全部成功完成。
-
 ---
 
-#### 6. 检查输出结果是否正确生成
+### 6. 检查输出结果是否正确生成
 
-使用如下命令检查所有结果目录是否包含 part 文件：
+在每次 Shuffle 实验结束后，Spark 会在输出目录写入一个特殊标记文件 `_SUCCESS`，用于表示作业已完整执行并成功结束。
+
+使用以下命令检查所有结果目录的执行状态：
 
 ```bash
 for d in /home/spark/results/*; do
   echo "$d:"
-  ls $d/part-*
+  if [ -f "$d/_SUCCESS" ]; then
+    echo "Job completed successfully (_SUCCESS found)"
+  else
+    echo "Missing _SUCCESS (job may have failed)"
+  fi
 done
+
 ```
 
-所有结果均成功写出，可进一步截图证明数据已生成。
+![](images/7.png)
+
+运行结果显示，所有实验目录均包含 `_SUCCESS` 文件，表明所有 Shuffle 任务均已完整执行，为后续解析 Spark Event Log 获取性能指标（运行时间、Shuffle I/O、Spill、CPU/GPU 时间等）提供了可靠依据。
 
 ---
 
@@ -365,7 +414,7 @@ done
 
 ![](images/SortShuffle.png)
 
-#### 1. 核心机制差异
+### 1. 核心机制差异
 | 维度                | Hash Shuffle                          | Sort Shuffle                          |
 |---------------------|---------------------------------------|---------------------------------------|
 | **文件数量**        | 生成 M×R 个文件（M=Map数，R=Reduce数），文件数随任务数剧增 | 仅生成 2×M 个文件（每个Map对应1个数据文件+1个索引文件） |
@@ -375,7 +424,7 @@ done
 
 ---
 
-#### 2. 性能与适用场景差异
+### 2. 性能与适用场景差异
 | 维度                | Hash Shuffle                          | Sort Shuffle                          |
 |---------------------|---------------------------------------|---------------------------------------|
 | **优势场景**        | 无需排序的小数据场景（省去排序开销）   | 大规模数据场景（文件数可控，稳定性高） |
@@ -383,13 +432,14 @@ done
 | **扩展性**          | 数据量增大时文件爆炸，无法扩展         | 支持海量数据，集群扩展能力强           |
 
 ---
+
 ## 实验结果与分析
 
 基于上述实验步骤，我们对生成的不同规模的数据集进行了 Hash Shuffle 与 Sort Shuffle 的性能对比。以下是对执行时间与 I/O 吞吐量的详细分析。
 
-#### 1. 执行时间分析 (Execution Time)
+### 1. 执行时间分析 (Execution Time)
 
-我们首先对比了四种组合在不同数据规模下的总的Shuffle执行时间（Duration）。
+我们首先对比了六种组合在不同数据规模下的总的Shuffle执行时间（Duration）。
 
 ![](images/duration_plot.png)
 
@@ -415,7 +465,7 @@ done
 
 ---
 
-#### 2. Shuffle I/O 数据量分析
+### 2. Shuffle I/O 数据量分析
 
 为了深入理解性能差异的来源，我们进一步分析了 Shuffle 过程中的磁盘写（Write）和读（Read）的数据量。
 
@@ -447,7 +497,7 @@ Shuffle Read 的趋势与 Shuffle Write 高度一致。sort-sort 需要通过网
 
 ---
 
-#### 3. 实验结论
+### 3. 实验结论
 
 综合执行时间与 I/O 监控数据，本实验得出以下结论：
 

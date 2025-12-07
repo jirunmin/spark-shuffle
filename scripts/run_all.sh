@@ -4,7 +4,7 @@ cd /home/spark/shuffle-app
 
 sizes="2m 4m 8m 16m 32m 64m"
 shuffles="hash sort"
-workloads="reduce sort"
+workloads="reduce sort sort-skew"
 
 for sz in $sizes; do
   for shuffle in $shuffles; do
